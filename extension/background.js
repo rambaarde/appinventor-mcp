@@ -1,6 +1,7 @@
 // Background service worker — bridges WebSocket (host) <-> content script (page)
 
-const WS_URL = 'ws://localhost:8765';
+/** Use 127.0.0.1 (not "localhost") so Chrome does not prefer IPv6 ::1 while the Node bridge listens on IPv4. */
+const WS_URL = 'ws://127.0.0.1:8765';
 let ws = null;
 let reconnectDelay = 1000;
 const MAX_RECONNECT_DELAY = 30000;
@@ -30,19 +31,27 @@ function isRecoverableSendMessageError(err) {
   );
 }
 
-/** Prefer the App Inventor tab the user is looking at, else first match. */
+/**
+ * Prefer any **active** App Inventor tab (any window), else first match.
+ * Avoids picking nothing when Cursor is focused but AI2 is open in another window.
+ */
 async function pickAppInventorTabId() {
+  const activeAi2 = await chrome.tabs.query({
+    url: ['*://*.appinventor.mit.edu/*'],
+    active: true
+  });
+  if (activeAi2.length > 0 && activeAi2[0].id != null) {
+    return activeAi2[0].id;
+  }
   const appTabs = await chrome.tabs.query({
     url: ['*://*.appinventor.mit.edu/*']
   });
   if (appTabs.length === 0) return null;
-
   const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (active?.id != null) {
     const hit = appTabs.find((t) => t.id === active.id);
     if (hit) return hit.id;
   }
-
   return appTabs[0].id;
 }
 
@@ -67,33 +76,6 @@ function pingTab(tabId, ms) {
   });
 }
 
-function waitForTabComplete(tabId) {
-  return new Promise((resolve, reject) => {
-    chrome.tabs.get(tabId, (tab) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      if (tab.status === 'complete') {
-        resolve();
-        return;
-      }
-      const timeout = setTimeout(() => {
-        chrome.tabs.onUpdated.removeListener(listener);
-        reject(new Error('Tab load timeout'));
-      }, 90000);
-      function listener(id, info) {
-        if (id === tabId && info.status === 'complete') {
-          clearTimeout(timeout);
-          chrome.tabs.onUpdated.removeListener(listener);
-          resolve();
-        }
-      }
-      chrome.tabs.onUpdated.addListener(listener);
-    });
-  });
-}
-
 /**
  * Ping + inject only (no reload). Safe for tab focus / onUpdated warming.
  */
@@ -114,58 +96,35 @@ async function warmBridgePingOrInject(tabId) {
 }
 
 /**
- * Full recovery for MCP tools: ping → inject → reload if still dead.
- * Reload runs only here so focusing a slow tab does not force-refresh the page.
+ * Fast path for MCP tool delivery — must finish well under the host WebSocket timeout (~30s).
+ * Does **not** reload the tab (that could block 60s+ and caused "Extension request timed out").
  */
-async function ensureAppInventorTabReady(tabId) {
+async function ensureContentScriptReachable(tabId) {
   try {
-    await pingTab(tabId, 4000);
+    await pingTab(tabId, 2000);
     return;
   } catch {
     /* try inject */
   }
-
   try {
     await injectContentScript(tabId);
-    await delay(280);
-    await pingTab(tabId, 6000);
+    await delay(120);
+    await pingTab(tabId, 3500);
     return;
   } catch {
-    /* try reload */
+    /* one more inject */
   }
-
-  const t = await getTab(tabId);
-  if (t.status !== 'complete') {
-    await waitForTabComplete(tabId);
-    await delay(500);
-    try {
-      await injectContentScript(tabId);
-      await delay(320);
-      await pingTab(tabId, 15000);
-      return;
-    } catch (e) {
-      throw e;
-    }
-  }
-
-  await new Promise((resolve, reject) => {
-    chrome.tabs.reload(tabId, () => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-      resolve();
-    });
-  });
-  await waitForTabComplete(tabId);
-  await delay(900);
   try {
+    await delay(100);
     await injectContentScript(tabId);
-  } catch {
-    /* manifest may have injected */
+    await delay(120);
+    await pingTab(tabId, 4000);
+    return;
+  } catch (e) {
+    throw new Error(
+      'App Inventor page bridge is not responding. Click the App Inventor tab, wait until the editor finishes loading, then retry.'
+    );
   }
-  await delay(320);
-  await pingTab(tabId, 20000);
 }
 
 /**
@@ -250,7 +209,7 @@ function connect() {
   ws = new WebSocket(WS_URL);
 
   ws.onopen = () => {
-    console.log('[MCP Bridge] Connected to host');
+    console.log('[MCP Bridge] Connected to host', WS_URL);
     reconnectDelay = 1000;
     warmAllAppInventorTabs();
   };
@@ -276,7 +235,7 @@ function connect() {
     }
 
     try {
-      await ensureAppInventorTabReady(tabId);
+      await ensureContentScriptReachable(tabId);
       const response = await sendMessageWithRecovery(tabId, {
         type: 'tool_call',
         requestId: msg.requestId,
@@ -297,7 +256,15 @@ function connect() {
     }
   };
 
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
+    console.warn(
+      '[MCP Bridge] WebSocket closed',
+      ev.code,
+      ev.reason || '(no reason)',
+      '— reconnect in',
+      reconnectDelay,
+      'ms'
+    );
     ws = null;
     setTimeout(() => {
       reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
@@ -305,7 +272,9 @@ function connect() {
     }, reconnectDelay);
   };
 
-  ws.onerror = () => {};
+  ws.onerror = (ev) => {
+    console.warn('[MCP Bridge] WebSocket error (is the Node host running on port 8765?)', ev);
+  };
 }
 
 // Keep-alive
@@ -322,4 +291,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.runtime.onInstalled.addListener(() => connect());
 chrome.runtime.onStartup.addListener(() => connect());
+self.addEventListener('online', () => {
+  console.log('[MCP Bridge] Network online — reconnecting');
+  reconnectDelay = 1000;
+  connect();
+});
 connect();

@@ -254,11 +254,17 @@ function startStdioProxyClient() {
   });
 }
 
-const wss = new WebSocketServer({ port: WS_PORT });
+/** Bind IPv4 loopback only — matches extension `ws://127.0.0.1` and avoids accidental LAN exposure. */
+const wss = new WebSocketServer({ port: WS_PORT, host: '127.0.0.1' });
 attachConnectionHandler(wss);
 
 wss.on('listening', () => {
-  stderr.write(`MCP Bridge WS server on port ${WS_PORT}\n`);
+  const addr = wss.address();
+  const where =
+    addr && typeof addr === 'object'
+      ? `${addr.address}:${addr.port}`
+      : `127.0.0.1:${WS_PORT}`;
+  stderr.write(`MCP Bridge WS server on ws://${where} (extension + stdio-proxy)\n`);
   startStdioReadline(wss);
 });
 

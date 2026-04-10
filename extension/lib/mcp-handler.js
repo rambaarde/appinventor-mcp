@@ -66,6 +66,7 @@ export const TOOL_DEFINITIONS = [
         screenName: { type: 'string' },
         mode: { type: 'string', enum: ['merge', 'replace'], description: 'merge (default) preserves existing components, replace wipes all' },
         parent: { type: 'string', description: 'Parent component name to nest inside (e.g. "CustomerPanel")' },
+        prepend: { type: 'boolean', description: 'When parent is set, insert new components before existing children (default false = append)' },
         components: {
           type: 'array',
           items: {
@@ -116,6 +117,19 @@ export const TOOL_DEFINITIONS = [
       properties: {
         xml: { type: 'string' },
         blocks: { type: 'array' }
+      },
+      required: []
+    }
+  },
+  {
+    name: 'set_blocks_xml',
+    description:
+      'Replace the entire Blocks workspace from XML (use with XML from get_blocks or a trusted patch). Clears existing blocks first. Requires Blocks editor open on the target screen.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        xml: { type: 'string', description: 'Full Blockly workspace XML' },
+        xmlBase64: { type: 'string', description: 'UTF-8 XML as base64 (for large workspaces)' }
       },
       required: []
     }

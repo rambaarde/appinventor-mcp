@@ -4,7 +4,8 @@
 const BRIDGE_PREFIX = 'appinventor-mcp-';
 const CACHE_KEY = 'mcpSessionParams';
 const pendingRequests = new Map();
-const TOOL_RESPONSE_MS = 25000;
+/** Stay under host tool timeout (30s) after background ping/inject (~10s worst case). */
+const TOOL_RESPONSE_MS = 20000;
 
 function injectPageBridge() {
   const root = document.documentElement;
